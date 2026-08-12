@@ -1,0 +1,27 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: ${DB_NAME}
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - db_data:/var/lib/postgresql/data
+      - ../deploy-config/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    restart: unless-stopped
+
+  app:
+    build: .
+    env_file: .env
+    ports:
+      - "127.0.0.1:5050:5050"
+    volumes:
+      - /app/etsy-shop-assistant/logs:/app/logs
+    depends_on:
+      - db
+    restart: unless-stopped
+
+volumes:
+  db_data:
