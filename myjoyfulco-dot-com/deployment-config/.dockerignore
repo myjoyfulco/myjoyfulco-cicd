@@ -1,0 +1,12 @@
+.env
+.env.*
+.git
+.gitignore
+node_modules
+dist
+coverage
+*.log
+deploy-plan.md
+deployment-blob.md
+README.md
+.DS_Store

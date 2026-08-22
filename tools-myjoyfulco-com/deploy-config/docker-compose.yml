@@ -19,6 +19,9 @@ services:
       - "127.0.0.1:5050:5050"
     volumes:
       - /app/etsy-shop-assistant/logs:/app/logs
+      - /app/etsy-shop-assistant/staged_uploads:/app/staged_uploads
+      - /app/etsy-shop-assistant/templates/static:/app/templates/static
+      - /app/etsy-shop-assistant/templates/prompts/users:/app/templates/prompts/users
     depends_on:
       - db
     restart: unless-stopped

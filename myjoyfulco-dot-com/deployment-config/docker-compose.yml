@@ -1,0 +1,36 @@
+services:
+  site:
+    image: "myjoyfulco-dot-com:${IMAGE_TAG:?IMAGE_TAG is required}"
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_EDITOR_API_ORIGIN: "${NEXT_PUBLIC_EDITOR_API_ORIGIN:?NEXT_PUBLIC_EDITOR_API_ORIGIN is required}"
+    network_mode: host
+    restart: unless-stopped
+    user: "${RUNTIME_UID:?RUNTIME_UID is required}:${RUNTIME_GID:?RUNTIME_GID is required}"
+    command: npm run start -- --hostname 127.0.0.1 --port 3000
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  editor-api:
+    image: "myjoyfulco-dot-com:${IMAGE_TAG:?IMAGE_TAG is required}"
+    network_mode: host
+    restart: unless-stopped
+    user: "${RUNTIME_UID:?RUNTIME_UID is required}:${RUNTIME_GID:?RUNTIME_GID is required}"
+    command: npm run editor-api
+    env_file:
+      - .env
+    volumes:
+      - /app/myjoyfulco-dot-com/tmp:/app/tmp
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "5"

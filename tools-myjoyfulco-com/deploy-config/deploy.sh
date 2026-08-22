@@ -8,11 +8,20 @@
 # given) a release-notes.md entry appended. Lives in deploy-config/ so it
 # survives repeated clone/delete cycles of the app repo itself.
 #
-# Usage: ./deploy.sh [-version <vX.Y.Z>] [--wipe-db]
+# -revert-to <tagname> is a rollback/redeploy of an already-released version
+# instead: it checks out that existing tag as the deploy target instead of
+# the default branch's latest HEAD, and skips creating a tag, the -version
+# requirement, and the release-notes.md entry entirely (there's nothing new
+# to tag or log — see the README for the full writeup).
+#
+# Usage: ./deploy.sh [-version <vX.Y.Z>] [-revert-to <tagname>] [--wipe-db]
 #   -version    Tag to create/push for this deploy (e.g. v1.2.3) and the
 #               heading used in release-notes.md. Optional — if omitted,
 #               you'll be asked to confirm, and the redeploy runs without
 #               creating a tag or recording a release-notes.md entry.
+#   -revert-to  Roll back to an existing tag instead of deploying the
+#               branch's latest HEAD. Mutually exclusive with -version.
+#               Fails clearly if the tag doesn't exist in the repo.
 #   --wipe-db   ALSO remove the Postgres data volume during undeploy.
 #               Never happens unless this flag is passed explicitly.
 
@@ -94,11 +103,12 @@ HEALTH_URL="http://${HEALTH_HOST}:${HEALTH_PORT}${HEALTH_PATH}"
 
 # ---- argument parsing ----
 usage() {
-  echo "Usage: $0 [-version <vX.Y.Z>] [--wipe-db]" >&2
+  echo "Usage: $0 [-version <vX.Y.Z>] [-revert-to <tagname>] [--wipe-db]" >&2
 }
 
 WIPE_DB=0
 VERSION=""
+REVERT_TO=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --wipe-db)
@@ -114,6 +124,15 @@ while [[ $# -gt 0 ]]; do
       VERSION="$2"
       shift 2
       ;;
+    -revert-to)
+      if [[ $# -lt 2 ]]; then
+        usage
+        echo "-revert-to requires a value" >&2
+        exit 1
+      fi
+      REVERT_TO="$2"
+      shift 2
+      ;;
     *)
       usage
       echo "Unknown argument: $1" >&2
@@ -122,7 +141,13 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [[ -z "$VERSION" ]]; then
+if [[ -n "$VERSION" && -n "$REVERT_TO" ]]; then
+  usage
+  echo "-version and -revert-to are mutually exclusive — -version cuts a new release, -revert-to rolls back to an existing one. Pass only one." >&2
+  exit 1
+fi
+
+if [[ -z "$VERSION" && -z "$REVERT_TO" ]]; then
   read -r -p "-version not supplied, deployment will run a redeploy Y/n " CONFIRM
   case "$CONFIRM" in
     [Nn]*)
@@ -132,7 +157,7 @@ if [[ -z "$VERSION" ]]; then
   esac
 fi
 
-log "Starting redeploy (branch=$BRANCH, version=${VERSION:-none}, wipe-db=$WIPE_DB)"
+log "Starting redeploy (branch=$BRANCH, version=${VERSION:-none}, revert-to=${REVERT_TO:-none}, wipe-db=$WIPE_DB)"
 
 require_file "$CONFIG_DIR/Dockerfile"
 require_file "$CONFIG_DIR/docker-compose.yml"
@@ -151,10 +176,12 @@ git clone --branch "$BRANCH" --single-branch "$REPO_URL" "$APP_DIR"
 
 # --single-branch skips tags outside that branch's history by default;
 # fetch every tag explicitly so the checks below see the repo's full state.
+# This also pulls in the commit objects for a -revert-to rollback target
+# that isn't reachable from $BRANCH at all.
 log "Fetching all tags from origin"
 git -C "$APP_DIR" fetch --tags origin
 
-# ---- 2. Tag and push the as-cloned commit (before any .env injection) ----
+# ---- 2. Tag+push a new release, or check out an existing tag to roll back to ----
 if [[ -n "$VERSION" ]]; then
   log "Step 2/7: tagging and pushing $VERSION"
 
@@ -176,6 +203,15 @@ if [[ -n "$VERSION" ]]; then
     fail "Failed to push tag $VERSION to origin (local tag was created but not pushed — investigate, then push or delete it manually before retrying)"
   fi
   log "Tag $VERSION created and pushed"
+elif [[ -n "$REVERT_TO" ]]; then
+  log "Step 2/7: rolling back to existing tag $REVERT_TO"
+
+  if ! git -C "$APP_DIR" rev-parse -q --verify "refs/tags/$REVERT_TO" >/dev/null; then
+    fail "Tag $REVERT_TO does not exist in this repo — refusing to deploy. Check the tag name (git tag -l on the repo) and try again."
+  fi
+
+  git -C "$APP_DIR" checkout --quiet "refs/tags/$REVERT_TO"
+  log "Checked out tag $REVERT_TO ($(git -C "$APP_DIR" rev-parse --short HEAD))"
 else
   log "Step 2/7: skipped (-version not supplied) — no tag will be created or pushed"
 fi
@@ -275,11 +311,13 @@ if [[ -n "$VERSION" ]]; then
     fi
     echo
   } >> "$RELEASE_NOTES"
+elif [[ -n "$REVERT_TO" ]]; then
+  log "Skipping release notes entry (rollback via -revert-to $REVERT_TO — nothing new to log)"
 else
   log "Skipping release notes entry (-version not supplied)"
 fi
 
-# ---- Cleanup of the cloned folder on success is currently DISABLED ----
+# ---- Cleanup of the cloned folder on success ----
 log "Step 8/8: cleaning up cloned folder"
 rm -rf "$APP_DIR"
 
@@ -287,6 +325,8 @@ echo
 echo "===================================="
 if [[ -n "$VERSION" ]]; then
   echo " SUCCESS: redeploy completed ($VERSION)"
+elif [[ -n "$REVERT_TO" ]]; then
+  echo " SUCCESS: redeploy completed (rollback to tag $REVERT_TO)"
 else
   echo " SUCCESS: redeploy completed (no version tag)"
 fi
