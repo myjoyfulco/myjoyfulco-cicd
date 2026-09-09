@@ -1,0 +1,19 @@
+services:
+  api:
+    build: .
+    env_file: .env
+    ports:
+      - "127.0.0.1:5051:5051"
+    volumes:
+      - /app/fewcoco-core/logs:/app/logs
+      - /app/fewcoco-core/staged_uploads:/app/staged_uploads
+      - /app/fewcoco-core/templates/static:/app/templates/static
+      - /app/fewcoco-core/templates/prompts/users:/app/templates/prompts/users
+    networks:
+      - esa
+    restart: unless-stopped
+
+networks:
+  esa:
+    external: true
+    name: etsy-shop-assistant_default
