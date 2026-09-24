@@ -1,1 +1,5 @@
 secret.env
+*/pv/
+*/deployment/.deploy.lock
+*/deployment/.last-success.env
+*/deployment/secret.env
