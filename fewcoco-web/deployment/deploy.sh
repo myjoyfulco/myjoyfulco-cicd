@@ -4,8 +4,9 @@
 
 set -Eeuo pipefail
 
-DEPLOY_ROOT=/srv/data/deployments/fewcoco-web
+DEPLOY_ROOT=${DEPLOY_ROOT:-/srv/data/deployments/fewcoco-web}
 DEPLOY_DIR=$DEPLOY_ROOT/deployment
+PROPERTIES_DIR=$DEPLOY_ROOT/properties
 PV_DIR=$DEPLOY_ROOT/pv
 APP_DIR=/srv/data/app/fewcoco-web
 BUILD_CACHE=$PV_DIR/buildcache
@@ -15,7 +16,9 @@ IMAGE_NAME=fewcoco-web
 CONTAINER_NAME=fewcoco-web
 BUILDER_NAME=fewcoco-web-deployer
 COMPOSE_FILE=$DEPLOY_DIR/docker-compose.yml
-SECRET_ENV=$DEPLOY_DIR/secret.env
+CONFIG_ENV=$PROPERTIES_DIR/config.env
+SECRET_ENV=$PROPERTIES_DIR/secret.env
+ENV_EXAMPLE=${ENV_EXAMPLE:-"$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/.env.example"}
 SYNC_STATE=$DEPLOY_DIR/.last-synchronized-commit
 REF=develop
 FORCE=0
@@ -24,21 +27,23 @@ KEEP_IMAGES=5
 SRC=
 PREVIOUS_IMAGE=
 DEPLOY_ATTEMPTED=0
+VALIDATE_PROPERTIES=0
 
-SYNC_FILES=(Dockerfile README.md deploy.sh docker-compose.yml secret.env.example)
+SYNC_FILES=(Dockerfile README.md deploy.sh docker-compose.yml config.env.example secret.env.example)
 
 log() { printf '\n==> %s\n' "$*"; }
 info() { printf '    %s\n' "$*"; }
 die() { printf '\nFAILED: %s\n' "$*" >&2; exit 1; }
 
 usage() {
-  printf 'Usage: %s [--force] [--ref <branch-or-sha>] [--no-push]\n' "${0##*/}"
+  printf 'Usage: %s [--force] [--ref <branch-or-sha>] [--no-push] [--validate-properties]\n' "${0##*/}"
 }
 
 while (($#)); do
   case "$1" in
     --force) FORCE=1; shift ;;
     --no-push) PUSH=0; shift ;;
+    --validate-properties) VALIDATE_PROPERTIES=1; shift ;;
     --ref)
       (($# >= 2)) || die '--ref requires a value'
       REF=$2
@@ -69,11 +74,11 @@ require_command() {
 
 env_value() {
   local key=$1
-  awk -F= -v wanted="$key" '$1 == wanted { sub(/^[^=]*=/, ""); print; found=1; exit } END { if (!found) exit 1 }' "$SECRET_ENV"
+  awk -F= -v wanted="$key" '$1 == wanted { sub(/^[^=]*=/, ""); print; found=1; exit } END { if (!found) exit 1 }' "$CONFIG_ENV"
 }
 
 compose() {
-  IMAGE="$1" docker compose --env-file "$SECRET_ENV" -f "$COMPOSE_FILE" "${@:2}"
+  IMAGE="$1" docker compose --env-file "$CONFIG_ENV" --env-file "$SECRET_ENV" -f "$COMPOSE_FILE" "${@:2}"
 }
 
 rollback() {
@@ -84,7 +89,7 @@ rollback() {
     compose "$PREVIOUS_IMAGE" up -d --remove-orphans || true
   else
     log 'No prior image exists; removing the failed container'
-    IMAGE="$IMAGE_REF" docker compose --env-file "$SECRET_ENV" -f "$COMPOSE_FILE" down || true
+    IMAGE="$IMAGE_REF" docker compose --env-file "$CONFIG_ENV" --env-file "$SECRET_ENV" -f "$COMPOSE_FILE" down || true
   fi
 }
 
@@ -98,35 +103,68 @@ on_error() {
 }
 trap 'on_error $LINENO' ERR
 
-validate_secret_env() {
-  [[ -f "$SECRET_ENV" ]] || die "$SECRET_ENV is missing; copy secret.env.example and set mode 0600"
-  [[ "$(stat -c '%a' "$SECRET_ENV")" == 600 ]] || die "$SECRET_ENV must have mode 0600"
+validate_config_env() {
+  [[ -f "$CONFIG_ENV" ]] || die "$CONFIG_ENV is missing; copy config.env.example"
 
   local line key value
   declare -A seen=()
   while IFS= read -r line || [[ -n "$line" ]]; do
     [[ "$line" =~ ^[[:space:]]*$ || "$line" =~ ^[[:space:]]*# ]] && continue
-    [[ "$line" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]] || die "$SECRET_ENV contains an invalid line"
+    [[ "$line" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]] || die "$CONFIG_ENV contains an invalid line"
     key=${line%%=*}
     value=${line#*=}
-    [[ -z "${seen[$key]:-}" ]] || die "$SECRET_ENV defines $key more than once"
+    [[ -z "${seen[$key]:-}" ]] || die "$CONFIG_ENV defines $key more than once"
     seen[$key]=1
     case "$key" in
       BIND_IP|HOST_PORT) ;;
+      IMAGE_ALLOWED_HOSTS)
+        [[ "$value" =~ ^https?://[^[:space:]/?#]+(:[0-9]+)?([[:space:]]+https?://[^[:space:]/?#]+(:[0-9]+)?)*$ ]] || die 'IMAGE_ALLOWED_HOSTS must be a space-separated list of http or https origins'
+        ;;
       VITE_*)
-        grep -q "^${key}=" "$SRC/.env.example" || die "$key is not declared in .env.example"
+        grep -q "^${key}=" "$ENV_EXAMPLE" || die "$key is not declared in .env.example"
         [[ ! "$key" =~ (SECRET|TOKEN|PASSWORD|PASS|KEY|CREDENTIAL|USERNAME) ]] || die "$key looks credential-bearing and cannot enter a browser bundle"
         [[ "$value" == /* && "$value" != //* && "$value" != *://* ]] || die "$key must be a same-origin absolute path"
         ;;
-      *) die "$SECRET_ENV contains unsupported key: $key" ;;
+      *) die "$CONFIG_ENV contains unsupported key: $key" ;;
     esac
-  done < "$SECRET_ENV"
+  done < "$CONFIG_ENV"
 
   local bind_ip host_port
   bind_ip=$(env_value BIND_IP) || die 'BIND_IP is required'
   host_port=$(env_value HOST_PORT) || die 'HOST_PORT is required'
   [[ "$bind_ip" == 127.0.0.1 ]] || die 'BIND_IP must be 127.0.0.1'
   [[ "$host_port" =~ ^[0-9]+$ ]] && ((host_port >= 1 && host_port <= 65535)) || die 'HOST_PORT must be an integer from 1 through 65535'
+}
+
+validate_secret_env() {
+  [[ -f "$SECRET_ENV" ]] || die "$SECRET_ENV is missing; create an empty file and set mode 0600"
+  [[ "$(stat -c '%a' "$SECRET_ENV")" == 600 ]] || die "$SECRET_ENV must have mode 0600"
+
+  local line key
+  declare -A seen=()
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ "$line" =~ ^[[:space:]]*$ || "$line" =~ ^[[:space:]]*# ]] && continue
+    [[ "$line" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]] || die "$SECRET_ENV contains an invalid line"
+    key=${line%%=*}
+    [[ -z "${seen[$key]:-}" ]] || die "$SECRET_ENV defines $key more than once"
+    seen[$key]=1
+    die "$SECRET_ENV contains unsupported key: $key"
+  done < "$SECRET_ENV"
+}
+
+validate_properties() {
+  [[ -d "$PROPERTIES_DIR" ]] || die "$PROPERTIES_DIR is missing"
+
+  local property_file
+  while IFS= read -r property_file; do
+    case "$property_file" in
+      config.env|secret.env) ;;
+      *) die "properties/ accepts only config.env and secret.env as operator input" ;;
+    esac
+  done < <(find "$PROPERTIES_DIR" -maxdepth 1 -type f -printf '%f\n' | sort)
+
+  validate_config_env
+  validate_secret_env
 }
 
 render_app_env() {
@@ -137,7 +175,7 @@ render_app_env() {
     [[ "$key" == VITE_* ]] || continue
     awk -F= -v key="$key" -v value="$value" 'BEGIN { OFS="=" } $1 == key { print key, value; next } { print }' "$destination" > "$temporary"
     mv "$temporary" "$destination"
-  done < "$SECRET_ENV"
+  done < "$CONFIG_ENV"
   chmod 600 "$destination"
 }
 
@@ -176,7 +214,7 @@ sync_deployment_files() {
   staged=$(git -C "$SRC" diff --cached --name-only)
   if [[ -n "$staged" ]]; then
     while IFS= read -r file; do
-      case " deployment/Dockerfile deployment/README.md deployment/deploy.sh deployment/docker-compose.yml deployment/secret.env.example " in
+      case " deployment/Dockerfile deployment/README.md deployment/deploy.sh deployment/docker-compose.yml deployment/config.env.example deployment/secret.env.example " in
         *" $file "*) ;;
         *) die "refusing to commit non-allowlisted file: $file" ;;
       esac
@@ -212,6 +250,12 @@ prune_images() {
   ((${#old_images[@]} == 0)) || docker image rm "${old_images[@]}" >/dev/null 2>&1 || true
 }
 
+if [[ $VALIDATE_PROPERTIES -eq 1 ]]; then
+  validate_properties
+  info 'properties validation passed'
+  exit 0
+fi
+
 [[ $EUID -ne 0 ]] || die 'run as the deployment user, not root'
 for command in git docker curl awk cmp mktemp stat sha256sum ss; do require_command "$command"; done
 docker info >/dev/null 2>&1 || die 'Docker daemon is unavailable to this user'
@@ -222,13 +266,14 @@ if ! docker buildx inspect "$BUILDER_NAME" >/dev/null 2>&1; then
 fi
 docker buildx inspect --bootstrap "$BUILDER_NAME" >/dev/null
 
-mkdir -p "$BUILD_CACHE" "$TMP_DIR" "$DEPLOY_DIR" "$DEPLOY_ROOT/properties" "$APP_DIR"
+mkdir -p "$BUILD_CACHE" "$TMP_DIR" "$DEPLOY_DIR" "$PROPERTIES_DIR" "$APP_DIR"
 [[ -w "$DEPLOY_DIR" && -w "$PV_DIR" ]] || die "$DEPLOY_ROOT must be writable by $(id -un)"
 
 SRC=$(mktemp -d /tmp/fewcoco-web-deploy-XXXXXXXX)
 log "Cloning $REF"
 git clone --quiet --branch "$REF" "$REPO" "$SRC" || die "unable to clone ref $REF"
-validate_secret_env
+ENV_EXAMPLE=$SRC/.env.example
+validate_properties
 
 HOST_PORT=$(env_value HOST_PORT)
 mapfile -t port_containers < <(docker ps --filter "publish=$HOST_PORT" --format '{{.Names}}')
@@ -274,7 +319,7 @@ mv "$NEXT_CACHE" "$BUILD_CACHE"
 
 log "Deploying $IMAGE_REF"
 DEPLOY_ATTEMPTED=1
-# --force also covers secret.env-only deployments. Browser configuration is
+# --force also covers configuration-only deployments. Browser configuration is
 # baked into the image, so the rendered public config fingerprints the build
 # cache and the unchanged-image container is recreated afterward.
 if [[ $FORCE -eq 1 ]]; then
@@ -308,4 +353,4 @@ info "commit:   $FULL_SHA"
 info "image:    $IMAGE_REF"
 info "status:   $(docker inspect --format '{{.State.Status}} / {{.State.Health.Status}}' "$CONTAINER_NAME")"
 info "loopback: http://127.0.0.1:$HOST_PORT/"
-info "logs:     IMAGE=$IMAGE_REF docker compose --env-file $SECRET_ENV -f $COMPOSE_FILE logs -f"
+info "logs:     IMAGE=$IMAGE_REF docker compose --env-file $CONFIG_ENV --env-file $SECRET_ENV -f $COMPOSE_FILE logs -f"
