@@ -2,10 +2,13 @@ name: fewcoco-web
 
 services:
   web:
+    # deploy.sh loads properties/config.env before properties/secret.env.
     image: ${IMAGE:?IMAGE not set - run deploy.sh}
     container_name: fewcoco-web
     ports:
       - "${BIND_IP:?BIND_IP not set}:${HOST_PORT:?HOST_PORT not set}:8080"
+    environment:
+      IMAGE_ALLOWED_HOSTS: ${IMAGE_ALLOWED_HOSTS:?IMAGE_ALLOWED_HOSTS not set}
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/healthz').then(r=>{if(!r.ok)throw Error(r.status)})"]
